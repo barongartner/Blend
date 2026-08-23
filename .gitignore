@@ -1,0 +1,5 @@
+.build/
+Blend.app/
+dist/
+.DS_Store
+Tests/fixtures/
