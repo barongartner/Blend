@@ -28,18 +28,22 @@ struct TrackInfo: Identifiable, Codable, Hashable {
     var localPath: String?
     /// True when the only way to get the audio is capturing Music app playback.
     var needsCapture: Bool
+    /// The Music playlist the song was picked from ("library" for the whole
+    /// library). Apple Music playlists can hold songs that were never added to
+    /// the library, so captures look the song up there first.
+    var playlistID: String?
 
     static func music(persistentID: String, title: String, artist: String, album: String,
-                      duration: Double, taggedBPM: Double?, localPath: String?, needsCapture: Bool) -> TrackInfo {
+                      duration: Double, taggedBPM: Double?, localPath: String?, needsCapture: Bool, playlistID: String?) -> TrackInfo {
         TrackInfo(id: "music:\(persistentID)", source: .music(persistentID: persistentID),
                   title: title, artist: artist, album: album, duration: duration,
-                  taggedBPM: taggedBPM, localPath: localPath, needsCapture: needsCapture)
+                  taggedBPM: taggedBPM, localPath: localPath, needsCapture: needsCapture, playlistID: playlistID)
     }
 
     static func file(path: String, title: String, artist: String, album: String, duration: Double, taggedBPM: Double?) -> TrackInfo {
         TrackInfo(id: "file:\(path)", source: .file(path: path),
                   title: title, artist: artist, album: album, duration: duration,
-                  taggedBPM: taggedBPM, localPath: path, needsCapture: false)
+                  taggedBPM: taggedBPM, localPath: path, needsCapture: false, playlistID: nil)
     }
 
     var persistentID: String? {

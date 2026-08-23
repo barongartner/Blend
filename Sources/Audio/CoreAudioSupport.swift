@@ -70,6 +70,41 @@ enum CA {
         readString(id, kAudioDevicePropertyDeviceUID)
     }
 
+    static func transportType(_ id: AudioDeviceID) -> UInt32 {
+        var t: UInt32 = 0
+        _ = read(id, kAudioDevicePropertyTransportType, into: &t)
+        return t
+    }
+
+    static func allDevices() -> [AudioDeviceID] {
+        var addr = address(kAudioHardwarePropertyDevices)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(systemObject, &addr, 0, nil, &size) == noErr, size > 0 else { return [] }
+        var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(systemObject, &addr, 0, nil, &size, &ids) == noErr else { return [] }
+        return ids
+    }
+
+    static func hasOutputStreams(_ id: AudioDeviceID) -> Bool {
+        var addr = address(kAudioDevicePropertyStreams, scope: kAudioObjectPropertyScopeOutput)
+        var size: UInt32 = 0
+        return AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr && size > 0
+    }
+
+    /// The device that clocks the capture aggregate. Never Bluetooth: starting
+    /// IO on an aggregate that contains a Bluetooth headset can open its mic,
+    /// which drops the whole headset to 8 kHz hands-free audio. Nothing is
+    /// played through this device anyway (the tap mutes the process).
+    static func captureClockDeviceUID() -> String? {
+        let bluetooth: Set<UInt32> = [kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE, kAudioDeviceTransportTypeAirPlay]
+        if let def = defaultOutputDevice(), !bluetooth.contains(transportType(def)), let uid = deviceUID(def) { return uid }
+        let builtIn = allDevices().first { transportType($0) == kAudioDeviceTransportTypeBuiltIn && hasOutputStreams($0) }
+        if let builtIn, let uid = deviceUID(builtIn) { return uid }
+        let any = allDevices().first { !bluetooth.contains(transportType($0)) && hasOutputStreams($0) }
+        if let any, let uid = deviceUID(any) { return uid }
+        return defaultOutputDevice().flatMap { deviceUID($0) }
+    }
+
     static func tapFormat(_ tapID: AudioObjectID) -> AudioStreamBasicDescription? {
         var asbd = AudioStreamBasicDescription()
         guard read(tapID, kAudioTapPropertyFormat, into: &asbd) == noErr, asbd.mSampleRate > 0 else { return nil }

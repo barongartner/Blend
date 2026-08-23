@@ -74,7 +74,10 @@ final class MusicCapture {
         }
         guard let musicApp else { throw CaptureError(description: "The Music app didn't launch.") }
         let originalVolume = (try? MusicBridge.soundVolume()) ?? 100
-        defer { MusicBridge.setSoundVolume(originalVolume) }
+        defer {
+            MusicBridge.setSoundVolume(originalVolume)
+            MusicBridge.removeCapturePlaylist()
+        }
 
         // 2. Music's audio process object. If it hasn't made a sound yet there is none;
         //    start the song so one appears, then we'll restart it once the tap is live.
@@ -82,7 +85,7 @@ final class MusicCapture {
         var startedEarly = false
         if processObject == nil {
             progress(0, "Waking Music's audio…")
-            try MusicBridge.playForCapture(persistentID: pid)
+            try MusicBridge.playForCapture(persistentID: pid, playlistID: track.playlistID)
             startedEarly = true
             for _ in 0..<60 {
                 if isCancelled() { MusicBridge.stop(); throw CaptureError(description: "Cancelled") }
@@ -96,9 +99,9 @@ final class MusicCapture {
             throw CaptureError(description: "Music never produced audio. Is this song playable (subscription active, song available in your country)?")
         }
 
-        // 3. Tap + aggregate on the default output device.
-        guard let outDev = CA.defaultOutputDevice(), let outUID = CA.deviceUID(outDev) else {
-            throw CaptureError(description: "No default output device.")
+        // 3. Tap + aggregate, clocked by a non-Bluetooth device (see CA.captureClockDeviceUID).
+        guard let outUID = CA.captureClockDeviceUID() else {
+            throw CaptureError(description: "No output device to clock the capture.")
         }
         BlendLog.write("capture: Music pid \(musicApp.processIdentifier), audio object \(processObject), output \(outUID)")
         let tap = try TapAggregate(processObjectID: processObject, destinationUID: outUID, mute: true)
@@ -146,22 +149,40 @@ final class MusicCapture {
             os_unfair_lock_lock(&rec.lock); defer { os_unfair_lock_unlock(&rec.lock) }
             return rec.samples.count / rec.channels
         }()
-        try MusicBridge.playForCapture(persistentID: pid)
-        defer { MusicBridge.stop() }
+        try MusicBridge.playForCapture(persistentID: pid, playlistID: track.playlistID)
+        defer {
+            MusicBridge.stop()
+            MusicBridge.removeCapturePlaylist()
+        }
 
         // 5. Wait for playback to start, then for it to end.
+        // Music can't always describe the current track for Apple Music items
+        // (`current track` errors); since we just told it to play a one-song
+        // playlist, "playing, unknown track" is accepted too. The recording's
+        // length is checked against the song's at the end regardless.
+        func matches(_ s: PlaybackStatus) -> Bool {
+            s.persistentID == pid || (!s.name.isEmpty && s.name == track.title) || (s.persistentID.isEmpty && s.name.isEmpty)
+        }
         var status: PlaybackStatus?
-        let startDeadline = Date().addingTimeInterval(20)
+        var seen: [String] = []
+        let startDeadline = Date().addingTimeInterval(45)
         while Date() < startDeadline {
             if isCancelled() { throw CaptureError(description: "Cancelled") }
             status = try? MusicBridge.playbackStatus()
-            if let s = status, s.state == .playing, s.persistentID == pid { break }
+            if let s = status {
+                let line = "\(s.state.rawValue)|\(String(format: "%.1f", s.position))|\(s.persistentID)|\(s.name)"
+                if seen.last != line { seen.append(line) }
+                if s.state == .playing, matches(s) { break }
+            }
             Thread.sleep(forTimeInterval: 0.25)
         }
-        guard let s0 = status, s0.state == .playing, s0.persistentID == pid else {
-            throw CaptureError(description: "Music didn't start playing \(track.title). Check that it plays in Music itself.")
+        guard let s0 = status, s0.state == .playing, matches(s0) else {
+            BlendLog.write("capture: Music never reported playing \(track.title) [\(pid)]; statuses seen: \(seen.joined(separator: " → "))")
+            throw CaptureError(description: "Music didn't start playing \(track.title) within 45 s. Play it in Music once to check it's available, then try again. (Details in blend.log.)")
         }
+        BlendLog.write("capture: playing \(s0.name) [\(s0.persistentID)] from \(String(format: "%.2f", s0.position))s")
         let expected = max(track.duration, 1)
+        let playStarted = Date()
         var lastPos = -1.0
         var lastAdvance = Date()
         let hardDeadline = Date().addingTimeInterval(expected + 45)
@@ -170,12 +191,15 @@ final class MusicCapture {
             if isCancelled() { throw CaptureError(description: "Cancelled") }
             Thread.sleep(forTimeInterval: 0.3)
             guard let s = try? MusicBridge.playbackStatus() else { continue }
-            if s.state == .stopped || (s.persistentID != pid && !s.persistentID.isEmpty) { break }
+            if s.state == .stopped || (!s.persistentID.isEmpty && !matches(s)) { break }
             if s.state == .paused { throw CaptureError(description: "Playback was paused in Music — capture aborted.") }
-            if s.position > lastPos + 0.01 { lastPos = s.position; lastAdvance = Date() }
-            else if Date().timeIntervalSince(lastAdvance) > 15 { throw CaptureError(description: "Playback stalled (streaming problem?).") }
+            if s.position >= 0 {
+                if s.position > lastPos + 0.01 { lastPos = s.position; lastAdvance = Date() }
+                else if Date().timeIntervalSince(lastAdvance) > 20 { throw CaptureError(description: "Playback stalled (streaming problem?).") }
+            }
             if Date() > hardDeadline { throw CaptureError(description: "Playback ran far past the song's length.") }
-            progress(min(0.99, max(0.01, s.position / expected)), "Recording \(formatTime(s.position)) / \(formatTime(expected))")
+            let shown = s.position >= 0 ? s.position : Date().timeIntervalSince(playStarted)
+            progress(min(0.99, max(0.01, shown / expected)), "Recording \(formatTime(shown)) / \(formatTime(expected))")
         }
         Thread.sleep(forTimeInterval: 0.4)   // let the last buffers arrive
 

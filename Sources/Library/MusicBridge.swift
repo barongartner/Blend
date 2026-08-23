@@ -18,6 +18,7 @@ struct PlaybackStatus {
     var state: State
     var position: Double      // seconds, -1 when nothing is loaded
     var persistentID: String  // of the current track, "" when none
+    var name: String          // of the current track, "" when none
 }
 
 enum MusicBridge {
@@ -94,7 +95,7 @@ enum MusicBridge {
             }
             return TrackInfo.music(persistentID: r.id, title: r.name, artist: r.artist, album: r.album,
                                    duration: r.duration, taggedBPM: r.bpm > 0 ? r.bpm : nil,
-                                   localPath: path, needsCapture: path == nil)
+                                   localPath: path, needsCapture: path == nil, playlistID: playlistID)
         }
     }
 
@@ -113,10 +114,15 @@ enum MusicBridge {
     /// Puts exactly one track into the "Blend Capture" playlist and plays it. With
     /// repeat off and nothing after it, Music stops at the end — and crucially,
     /// Music's own crossfade/AutoMix has no next song to blend into.
-    static func playForCapture(persistentID: String) throws {
+    ///
+    /// The song is looked up in the playlist it was picked from first: Apple
+    /// Music playlists can contain songs that were never added to the library,
+    /// and those only exist as `shared track`s inside that playlist.
+    static func playForCapture(persistentID: String, playlistID: String?) throws {
         let script = """
         on run argv
             set pid to item 1 of argv
+            set plid to item 2 of argv
             tell application "Music"
                 if not (exists user playlist "\(captureplaylistName)") then
                     make new user playlist with properties {name:"\(captureplaylistName)"}
@@ -125,8 +131,22 @@ enum MusicBridge {
                 try
                     delete every track of capPL
                 end try
-                set srcTracks to (every track of library playlist 1 whose persistent ID is pid)
-                if (count of srcTracks) is 0 then error "Track not found in the Music library"
+                set srcTracks to {}
+                if plid is not "" and plid is not "library" then
+                    set pls to (every user playlist whose persistent ID is plid)
+                    if (count of pls) > 0 then set srcTracks to (every track of (item 1 of pls) whose persistent ID is pid)
+                end if
+                if (count of srcTracks) is 0 then set srcTracks to (every track of library playlist 1 whose persistent ID is pid)
+                if (count of srcTracks) is 0 then
+                    repeat with p in (every user playlist)
+                        set found to (every track of p whose persistent ID is pid)
+                        if (count of found) > 0 then
+                            set srcTracks to found
+                            exit repeat
+                        end if
+                    end repeat
+                end if
+                if (count of srcTracks) is 0 then error "Song not found in any playlist or in the library — was it removed from Music?"
                 duplicate (item 1 of srcTracks) to capPL
                 set song repeat to off
                 set shuffle enabled to false
@@ -135,10 +155,20 @@ enum MusicBridge {
                 end try
                 set sound volume to 100
                 play capPL
+                delay 1
+                set st to "stopped"
+                if player state is playing then set st to "playing"
+                if player state is paused then set st to "paused"
+                set nm to ""
+                try
+                    set nm to name of current track
+                end try
+                return "capture playlist has " & (count of tracks of capPL) & " track(s); after play: " & st & " / " & nm
             end tell
         end run
         """
-        _ = try runAppleScript(script, arguments: [persistentID])
+        let report = try runAppleScript(script, arguments: [persistentID, playlistID ?? ""])
+        BlendLog.write("capture: \(report.trimmingCharacters(in: .whitespacesAndNewlines))")
     }
 
     static func playbackStatus() throws -> PlaybackStatus {
@@ -149,19 +179,24 @@ enum MusicBridge {
             if player state is paused then set st to "paused"
             set pos to -1
             set pid to ""
+            set nm to ""
             try
                 set pos to player position
-                set pid to persistent ID of current track
             end try
-            return st & "|" & pos & "|" & pid
+            try
+                set pid to persistent ID of current track
+                set nm to name of current track
+            end try
+            return st & "|" & pos & "|" & pid & "|" & nm
         end tell
         """
         let s = try runAppleScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
         let parts = s.components(separatedBy: "|")
-        guard parts.count == 3, let state = PlaybackStatus.State(rawValue: parts[0]) else {
+        guard parts.count >= 4, let state = PlaybackStatus.State(rawValue: parts[0]) else {
             throw MusicBridgeError(description: "Unexpected player status: \(s)")
         }
-        return PlaybackStatus(state: state, position: Double(parts[1]) ?? -1, persistentID: parts[2])
+        return PlaybackStatus(state: state, position: Double(parts[1]) ?? -1, persistentID: parts[2],
+                              name: parts[3...].joined(separator: "|"))
     }
 
     static func stop() {

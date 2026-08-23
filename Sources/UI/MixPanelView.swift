@@ -23,9 +23,13 @@ struct MixPanelView: View {
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 Button { model.services.prepareAll() } label: { Label("Prepare All", systemImage: "waveform.badge.magnifyingglass") }
-                    .help("Capture any Apple Music songs that aren't recorded yet and analyze everything")
+                    .disabled(model.project.entries.isEmpty || model.allEntriesReady || model.activeCapture != nil)
+                    .help(model.allEntriesReady && !model.project.entries.isEmpty
+                          ? "Prepare All — every song is already captured and analyzed, nothing to do"
+                          : "Prepare All — record any Apple Music songs that aren't captured yet and analyze every song")
                 Button { showSettings.toggle() } label: { Label("Settings", systemImage: "gearshape") }
-                    .popover(isPresented: $showSettings) { MixSettingsView().environmentObject(model).padding().frame(width: 360) }
+                    .help("Mix settings: format, sample rate, loudness, end fade")
+                    .popover(isPresented: $showSettings, arrowEdge: .bottom) { MixSettingsView().environmentObject(model) }
                 Button { ExportAction.run(model: model) } label: { Label("Export…", systemImage: "square.and.arrow.up") }
                     .disabled(model.renderProgress != nil)
             }
@@ -259,27 +263,48 @@ struct MixSettingsView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        Form {
-            Picker("Export format", selection: $model.project.settings.exportFormat) {
-                ForEach(ExportFormat.allCases) { Text($0.label).tag($0) }
-            }
-            Picker("Sample rate", selection: $model.project.settings.sampleRate) {
-                Text("48 kHz (video)").tag(48000.0)
-                Text("44.1 kHz (music)").tag(44100.0)
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Mix settings").font(.headline)
+            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 10) {
+                GridRow {
+                    Text("Export format").gridColumnAlignment(.trailing)
+                    Picker("Export format", selection: $model.project.settings.exportFormat) {
+                        ForEach(ExportFormat.allCases) { Text($0.label).tag($0) }
+                    }
+                    .labelsHidden().frame(width: 220)
+                }
+                GridRow {
+                    Text("Sample rate")
+                    Picker("Sample rate", selection: $model.project.settings.sampleRate) {
+                        Text("48 kHz (video)").tag(48000.0)
+                        Text("44.1 kHz (music)").tag(44100.0)
+                    }
+                    .labelsHidden().frame(width: 220)
+                }
+                GridRow {
+                    Text("Fade out the end")
+                    HStack(spacing: 6) {
+                        TextField("0", value: $model.project.settings.endFadeSeconds, format: .number)
+                            .textFieldStyle(.roundedBorder).frame(width: 60).multilineTextAlignment(.trailing)
+                        Text("seconds (0 = none)").foregroundStyle(.secondary)
+                    }
+                }
+                GridRow {
+                    Text("Mix name")
+                    TextField("Mix name", text: $model.project.name)
+                        .textFieldStyle(.roundedBorder).frame(width: 220)
+                }
             }
             Toggle("Match loudness between songs", isOn: $model.project.settings.matchLoudness)
-            Toggle("Key lock (keep pitch when tempo-matching)", isOn: $model.project.settings.keyLock)
-            HStack {
-                Text("Fade out the end")
-                Spacer()
-                TextField("0", value: $model.project.settings.endFadeSeconds, format: .number)
-                    .frame(width: 50).multilineTextAlignment(.trailing)
-                Text("s")
-            }
-            TextField("Mix name", text: $model.project.name)
-            Text("Exports go wherever you choose in the save panel. MP3 uses ffmpeg\(Exporter.findFFmpeg() == nil ? " — none found on this Mac; WAV and AAC still work" : "").")
+            Toggle("Key lock — keep pitch when tempo-matching (off = vinyl-style pitch shift)", isOn: $model.project.settings.keyLock)
+            Text(Exporter.findFFmpeg() == nil
+                 ? "MP3 export needs ffmpeg, and none was found on this Mac — WAV and AAC still work."
+                 : "MP3 export uses ffmpeg. WAV is exact to the millisecond; MP3 comes out about 50 ms longer (encoder padding).")
                 .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .padding(18)
+        .frame(width: 440)
     }
 }
 

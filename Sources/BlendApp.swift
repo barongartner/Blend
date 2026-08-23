@@ -105,7 +105,13 @@ enum DebugCapture {
     @MainActor static func run(model: AppModel, persistentID: String) {
         BlendLog.write("debug capture requested for \(persistentID)")
         DispatchQueue.global().async {
-            let tracks = (try? MusicBridge.fetchTracks(playlistID: "library")) ?? []
+            var tracks = (try? MusicBridge.fetchTracks(playlistID: "library")) ?? []
+            if !tracks.contains(where: { $0.persistentID == persistentID }) {
+                for pl in (try? MusicBridge.fetchPlaylists()) ?? [] where !pl.isLibrary {
+                    tracks += (try? MusicBridge.fetchTracks(playlistID: pl.id)) ?? []
+                    if tracks.contains(where: { $0.persistentID == persistentID }) { break }
+                }
+            }
             guard let track = tracks.first(where: { $0.persistentID == persistentID }) else {
                 BlendLog.write("debug capture: track \(persistentID) not in library")
                 DispatchQueue.main.async { exit(0) }
