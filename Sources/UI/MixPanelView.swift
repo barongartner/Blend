@@ -225,11 +225,17 @@ struct MixEntryRow: View {
     }
 
     private func transitionSummary(_ tl: TrackLayout?) -> String {
-        let t = resolved.transition
-        if t.style == .cut { return "Cut on the downbeat" }
-        var s = "\(t.style.label), \(t.overlapBars) bar\(t.overlapBars == 1 ? "" : "s")"
-        if t.tempoSync { s += ", tempo-synced" }
-        if let tl { s += " · \(TimeFormat.short(Double(tl.outroOverlap) / layout.sampleRate))" }
+        guard let t = resolved.transitionOut else { return "" }
+        var s = resolved.transition.style == .auto ? "Auto → \(t.style.label)" : t.style.label
+        switch t.style {
+        case .blend:
+            s += ", \(t.overlapBars) bars"
+            if t.tempoSynced { s += ", tempo-synced" }
+        case .echoOut: s += ", \(t.tailBars)-bar tail"
+        case .filterDrop: s += ", \(t.sweepBars)-bar sweep" + (t.riser ? " + riser" : "")
+        case .cut: s += " on the phrase"
+        }
+        if !t.reason.isEmpty { s += " · \(t.reason)" }
         return s
     }
 }

@@ -9,7 +9,8 @@ enum TrackAnalyzer {
 
     static func analyze(clip: AudioClip, taggedBPM: Double?) -> TrackAnalysis {
         let (signal, rate) = AudioDecoder.analysisSignal(from: clip)
-        let grid = BeatAnalyzer.analyze(signal: signal, sampleRate: rate, taggedBPM: taggedBPM)
+        let mel = Spectrogram.logMel(signal: signal, sampleRate: rate)
+        let grid = BeatAnalyzer.analyze(signal: signal, sampleRate: rate, taggedBPM: taggedBPM, mel: mel)
         let key = KeyAnalyzer.detect(signal: signal, sampleRate: rate)
         let peaks = overviewPeaks(clip: clip)
         let rms = rmsLevel(clip.left, clip.right)
@@ -21,7 +22,13 @@ enum TrackAnalyzer {
             beats: grid.beats, gridConfidence: grid.confidence,
             keyName: key.name, camelot: key.camelot, keyConfidence: key.confidence,
             peaks: peaks, peaksPerSecond: peaksPerSecond, rms: rms,
-            suggestedIn: 0, suggestedOut: clip.duration)
+            suggestedIn: 0, suggestedOut: clip.duration, structure: nil)
+        // The downbeat comes from structure (section changes land on the "1");
+        // the beat tracker's guess is only a fallback for very short audio.
+        let st = StructureAnalyzer.analyze(clip: clip, signal: signal, analysisRate: rate, mel: mel,
+                                           bpm: analysis.bpm, beatOffset: analysis.beatOffset)
+        analysis.downbeatPhase = st.downbeatPhase
+        analysis.structure = st.structure
         let (inT, outT) = suggestedRange(clip: clip, analysis: analysis)
         analysis.suggestedIn = inT
         analysis.suggestedOut = outT

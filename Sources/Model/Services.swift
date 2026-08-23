@@ -267,8 +267,8 @@ final class Services {
 
     func makeRenderer() -> MixRenderer? {
         guard let model else { return nil }
-        let entries = model.resolvedEntries
         let layout = model.layout
+        let entries = layout.entries
         let settings = model.project.settings
         let urls: [URL?] = entries.map { audioURL(for: $0.entry.track) }
         let ids = entries.map { $0.entry.track.id }

@@ -10,7 +10,7 @@ import Foundation
 
 struct TrackAnalysis: Codable, Equatable {
     /// Bumped whenever the analyzer changes; older cached results are redone.
-    static let currentVersion = 3
+    static let currentVersion = 4
     var version: Int
     var sampleRate: Double
     var duration: Double
@@ -40,13 +40,17 @@ struct TrackAnalysis: Codable, Equatable {
     /// Auto in/out points: the first and last bar that isn't a quiet intro/outro.
     var suggestedIn: Double
     var suggestedOut: Double
+    /// Sections, phrases, intro/outro/drops — what the transition planner reads.
+    var structure: SongStructure?
 
     var beatLength: Double { 60.0 / bpm }
     var barLength: Double { beatLength * 4 }
 
-    /// Time of the first downbeat at or after t = 0.
+    /// Time of the first downbeat at or after t = 0. `downbeatPhase` counts
+    /// beats from the first grid beat at or after t = 0.
     var firstDownbeat: Double {
-        let d = beatOffset + Double(downbeatPhase) * beatLength
+        let beat0 = beatOffset - floor(beatOffset / beatLength) * beatLength
+        let d = beat0 + Double(downbeatPhase) * beatLength
         return d - floor(d / barLength) * barLength
     }
 

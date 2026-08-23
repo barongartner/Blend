@@ -48,10 +48,13 @@ On first launch macOS asks two things. Both are required, both are one-time:
    - drag the **IN** and **OUT** handles on the waveform, or type times, or
      nudge by a beat or a bar. Snap keeps them on beats; the snap-to-bar button
      puts them on a downbeat so transitions line up bar-for-bar.
-   - **transition** into the next song: style (bass swap, crossfade, filter
-     sweep, or a hard cut on the downbeat), overlap length in bars, whether to
-     tempo-sync the next song and how many bars it takes to ease back to its own
-     tempo. **Preview transition** renders and plays just that moment.
+   - **transition** into the next song: Auto (shows what it chose and why),
+     Blend, Echo out, Filter drop, or Cut; overlap/sweep length, tempo-sync and
+     ease-back for blends, tail length for echoes, a riser for drops.
+     **Preview transition** renders and plays just that moment.
+   - IN and OUT are **auto-placed** from the song's structure until you move
+     them; **Auto** puts them back. The *phrase* buttons snap to 8-bar phrase
+     boundaries.
    - **BPM / ½ / ×2**, **Downbeat ‹ ›** and the **Grid** nudges are there for the
      song the analyzer gets wrong. The grid lines should sit on the kicks; if
      they sit between them, hit *−½ beat*.
@@ -85,16 +88,22 @@ longer than the readout. Export WAV when the length has to be exact.
   so you can nudge the rare miss.
 - **Key** by chroma correlation (Krumhansl-Kessler), shown as a Camelot code;
   the badge colour tells you if it clashes with the previous song.
-- **Transitions** line up downbeats. The incoming song is time-stretched to
-  the outgoing tempo for the overlap (WSOLA with key lock, so pitch stays
-  put; or vinyl-style varispeed if you prefer), then eases back to its own
-  tempo over the bars you chose. Songs more than ~25% apart in tempo get a
-  plain overlap and a warning — nobody wants a 90 BPM song dragged to 128.
-  Bass swap splits both songs at 200 Hz and hands the low end over in one beat
-  at the midpoint while the highs crossfade; filter sweep sinks the outgoing
-  song under a low-pass while the new one opens up.
-- **Loudness** is matched per song (RMS over the part you use) and the whole
-  mix is peak-normalized to −1 dBFS on export.
+- **Structure.** Per-beat timbre, harmony and energy give a novelty curve;
+  its peaks mark section changes and decide the downbeat (drops and chord
+  changes land on the "1"), the 8-bar phrase grid, the intro, the drops and
+  the outro. The editor paints it along the top of the waveform.
+- **Transitions** happen on phrase boundaries: mix out at the end of the
+  last drop, mix in so the next song's drop lands as the old one leaves.
+  **Auto** picks the move per pair — a **blend** (next song opens up filtered
+  under this song's outro, bass hands over halfway, highs roll off) when both
+  songs have room and the keys agree; an **echo out** (last beat rings away
+  in time, next song starts clean on the 1) when the tempos are too far apart
+  or there's no intro/outro; a **filter drop** (high-pass sweep, then cut on
+  the phrase, optional riser) when the keys clash. Or choose yourself,
+  including a hard **cut**. Blends tempo-sync the incoming song (WSOLA, key
+  lock) within ±8% and ease it back to its own tempo afterwards.
+- **Loudness** is matched per song (−14 dBFS RMS over the part you use) and
+  the export runs through a lookahead brickwall limiter at −1 dBFS.
 
 More detail in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 

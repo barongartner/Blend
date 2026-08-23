@@ -75,13 +75,13 @@ final class AppModel: ObservableObject {
 
     // MARK: - Derived
 
-    var resolvedEntries: [ResolvedEntry] {
-        project.entries.map { ResolvedEntry(entry: $0, analysis: analyses[$0.track.id]) }
+    /// The mix as planned: transitions resolved, automatic IN/OUT points placed.
+    var layout: MixLayout {
+        MixLayout.build(entries: project.entries.map { ResolvedEntry(entry: $0, analysis: analyses[$0.track.id]) },
+                        sampleRate: project.settings.sampleRate)
     }
 
-    var layout: MixLayout {
-        MixLayout.build(entries: resolvedEntries, sampleRate: project.settings.sampleRate)
-    }
+    var resolvedEntries: [ResolvedEntry] { layout.entries }
 
     var totalSeconds: Double { layout.totalSeconds }
 

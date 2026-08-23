@@ -399,8 +399,8 @@ enum BeatAnalyzer {
 
     // MARK: - Entry point
 
-    static func analyze(signal: [Float], sampleRate: Double, taggedBPM: Double?) -> BeatGrid {
-        let mel = Spectrogram.logMel(signal: signal, sampleRate: sampleRate)
+    static func analyze(signal: [Float], sampleRate: Double, taggedBPM: Double?, mel precomputed: Spectrogram.MelResult? = nil) -> BeatGrid {
+        let mel = precomputed ?? Spectrogram.logMel(signal: signal, sampleRate: sampleRate)
         let on = onsets(from: mel)
         let duration = Double(signal.count) / sampleRate
         guard on.envelope.count > Int(on.fps * 5) else {
@@ -479,6 +479,8 @@ enum BeatAnalyzer {
             let med = residuals.isEmpty ? 0 : residuals[residuals.count / 2]
             print("  candidates: \(candidates.map { String(format: "%.2f", $0) })  chosen \(bpm) score \(String(format: "%.2f", best.score))  DP-vs-comb phase: median \(Int(med * 1000)) ms, q1 \(Int((residuals.isEmpty ? 0 : residuals[residuals.count / 4]) * 1000)) q3 \(Int((residuals.isEmpty ? 0 : residuals[residuals.count * 3 / 4]) * 1000)), \(beats.count) beats")
         }
+        // Downbeat phase is decided by StructureAnalyzer (section changes land on
+        // the "1"); this is only the fallback for audio too short to analyze.
         let phase = downbeatPhase(on: on, mel: mel, bpm: bpm, offset: offset, duration: duration)
         return BeatGrid(bpm: bpm, offset: offset, downbeatPhase: phase, beats: beats, confidence: confidence)
     }

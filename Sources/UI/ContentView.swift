@@ -180,7 +180,9 @@ struct TrackListView: View {
                     }
                     .width(40)
                     TableColumn("Audio") { t in
-                        AudioStatusBadge(track: t)
+                        // Passed explicitly: Table cells on macOS can be built without the
+                        // environment and @EnvironmentObject then traps.
+                        AudioStatusBadge(model: model, track: t)
                     }
                     .width(90)
                 }
@@ -207,7 +209,7 @@ struct TrackListView: View {
 }
 
 struct AudioStatusBadge: View {
-    @EnvironmentObject var model: AppModel
+    @ObservedObject var model: AppModel
     let track: TrackInfo
 
     var body: some View {

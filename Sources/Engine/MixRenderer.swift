@@ -1,8 +1,9 @@
 // Turns a MixLayout into audio. Each song is rendered once into its "span"
-// (its whole output, rate-mapped and level-matched); the composer then writes
-// any output range by copying solo regions straight from spans and running
-// the transition blend where two spans overlap. The full render streams the
-// mix to a float CAF in chunks so only two or three songs are in memory.
+// (its whole output: rate-mapped source, level-matched, plus any filter sweep
+// at its end and any synthesized echo tail); the composer then writes any
+// output range by copying solo regions straight from spans and mixing the
+// regions where two songs meet. The full render streams the mix to a float
+// CAF in chunks so only two or three songs are in memory.
 
 import Foundation
 import AVFoundation
@@ -30,8 +31,9 @@ final class MixRenderer {
     let settings: MixSettings
     let clipProvider: (Int) throws -> AudioClip
 
-    static let targetRMS: Float = 0.1585   // −16 dBFS
-    static let maxMatchGainDB = 10.0
+    /// −14 dBFS RMS per song; the export limiter catches the peaks.
+    static let targetRMS: Float = 0.2
+    static let maxMatchGainDB = 12.0
 
     private var spans: [Int: StereoBuffer] = [:]
     private var transitions: [Int: StereoBuffer] = [:]   // keyed by incoming track index
@@ -52,23 +54,22 @@ final class MixRenderer {
         if let s = spans[i] { return s }
         let t = layout.tracks[i]
         let clip = try clipProvider(i)
-        var out: StereoBuffer
         let keyLock = settings.keyLock
+        var out = StereoBuffer(count: t.span)
+
+        // Source audio: stretched entry + ramp, exact copy of the rest.
         if t.isStretched {
-            // Stretch the entry + ramp, copy the rest exactly, crossfade at the seam
-            // so beat positions in the body are sample-exact.
             let seam = t.entryOverlap + t.rampOut
-            let fade = min(1024, t.span - seam)
-            let stretched = TimeStretch.render(source: clip, count: min(t.span, seam + fade), keyLock: keyLock) { t.sourcePosition(atOutputOffset: $0) }
-            let rest = TimeStretch.copy(source: clip, from: Int(t.sourcePosition(atOutputOffset: Double(seam)).rounded()), count: t.span - seam)
-            out = StereoBuffer(count: t.span)
-            for u in 0..<seam {
+            let fade = max(0, min(1024, t.sourceSpan - seam))
+            let stretched = TimeStretch.render(source: clip, count: min(t.sourceSpan, seam + fade), keyLock: keyLock) { t.sourcePosition(atOutputOffset: $0) }
+            let rest = TimeStretch.copy(source: clip, from: Int(t.sourcePosition(atOutputOffset: Double(seam)).rounded()), count: t.sourceSpan - seam)
+            for u in 0..<min(seam, stretched.left.count) {
                 out.left[u] = stretched.left[u]
                 out.right[u] = stretched.right[u]
             }
-            for j in 0..<(t.span - seam) {
+            for j in 0..<(t.sourceSpan - seam) {
                 let u = seam + j
-                if j < fade {
+                if j < fade, u < stretched.left.count {
                     let w = Float(j) / Float(fade)
                     out.left[u] = stretched.left[u] * (1 - w) + rest.left[j] * w
                     out.right[u] = stretched.right[u] * (1 - w) + rest.right[j] * w
@@ -78,20 +79,42 @@ final class MixRenderer {
                 }
             }
         } else {
-            let o = TimeStretch.copy(source: clip, from: Int(t.inSample.rounded()), count: t.span)
-            out = StereoBuffer(left: o.left, right: o.right)
+            let o = TimeStretch.copy(source: clip, from: Int(t.inSample.rounded()), count: t.sourceSpan)
+            for u in 0..<t.sourceSpan {
+                out.left[u] = o.left[u]
+                out.right[u] = o.right[u]
+            }
         }
 
         // Level.
-        let g = gain(for: i, clip: clip)
-        var gg = g
-        vDSP_vsmul(out.left, 1, &gg, &out.left, 1, vDSP_Length(out.count))
-        vDSP_vsmul(out.right, 1, &gg, &out.right, 1, vDSP_Length(out.count))
+        var g = gain(for: i, clip: clip)
+        vDSP_vsmul(out.left, 1, &g, &out.left, 1, vDSP_Length(out.count))
+        vDSP_vsmul(out.right, 1, &g, &out.right, 1, vDSP_Length(out.count))
 
-        // Anti-click fades at hard edges (cuts), 5 ms.
+        let isLast = i == layout.tracks.count - 1
+        let transition = entries[i].transitionOut
+        let beatSamples = entries[i].beatLength * sampleRate
+
+        // Filter drop: high-pass sweep over the last bars of the source, optional riser.
+        if !isLast, let tr = transition, tr.style == .filterDrop, t.sweep > 0 {
+            Effects.highPassSweep(&out, from: t.sourceSpan - t.sweep, count: t.sweep, sampleRate: sampleRate)
+            if tr.riser {
+                Effects.addRiser(&out, from: t.sourceSpan - t.sweep, count: t.sweep, sampleRate: sampleRate, level: 0.12)
+            }
+        }
+
+        // Echo tail: the last two beats feed a tempo-synced delay that rings out under the next song.
+        if !isLast, t.tail > 0 {
+            Effects.echoTail(&out, sourceEnd: t.sourceSpan, feedBeats: 2, beatSamples: beatSamples, tail: t.tail, sampleRate: sampleRate)
+        }
+
+        // Anti-click fades at hard edges, 5 ms.
         let edge = Int(sampleRate * 0.005)
         if i > 0 && t.entryOverlap == 0 { applyFade(&out, from: 0, count: edge, fadeIn: true) }
-        if i < layout.tracks.count - 1 && t.outroOverlap == 0 { applyFade(&out, from: out.count - edge, count: edge, fadeIn: false) }
+        if !isLast && t.outroOverlap == 0 {
+            // Dry signal stops at the cut; a short fade avoids a click (the echo tail, if any, continues).
+            applyFade(&out, from: max(0, t.sourceSpan - edge), count: min(edge, t.sourceSpan), fadeIn: false)
+        }
 
         spans[i] = out
         return out
@@ -131,7 +154,7 @@ final class MixRenderer {
 
     // MARK: - Transitions
 
-    /// The blended overlap where song `i` comes in over song `i-1`.
+    /// The mixed region where song `i` comes in over song `i-1`'s outro or tail.
     func transition(into i: Int) throws -> StereoBuffer {
         if let t = transitions[i] { return t }
         let cur = layout.tracks[i]
@@ -139,67 +162,22 @@ final class MixRenderer {
         let len = cur.entryOverlap
         let a = try span(i - 1)
         let b = try span(i)
-        let aStart = prev.span - prev.outroOverlap
+        let aStart = prev.span - len
         var out = StereoBuffer(count: len)
-        let style = entries[i - 1].transition.style
+        let style = entries[i - 1].transitionOut?.style ?? .cut
         let beatSamples = entries[i - 1].beatLength * sampleRate
-        blend(a: a, aOffset: aStart, b: b, style: style, beatSamples: beatSamples, into: &out)
-        transitions[i] = out
-        return out
-    }
-
-    private func blend(a: StereoBuffer, aOffset: Int, b: StereoBuffer, style: TransitionStyle, beatSamples: Double, into out: inout StereoBuffer) {
-        let len = out.count
-        guard len > 0 else { return }
-        let sr = sampleRate
         switch style {
-        case .crossfade, .cut:
+        case .blend:
+            Effects.blend(a: a, aOffset: aStart, b: b, beatSamples: beatSamples, sampleRate: sampleRate, into: &out)
+        case .echoOut, .filterDrop, .cut:
+            // Incoming at full level; the outgoing contributes only its ringing tail.
             for u in 0..<len {
-                let x = Float(u) / Float(len)
-                let ga = cosf(x * .pi / 2), gb = sinf(x * .pi / 2)
-                out.left[u] = a.left[aOffset + u] * ga + b.left[u] * gb
-                out.right[u] = a.right[aOffset + u] * ga + b.right[u] * gb
-            }
-        case .bassSwap:
-            var xaL = CrossoverPair(cutoff: 200, sampleRate: sr), xaR = CrossoverPair(cutoff: 200, sampleRate: sr)
-            var xbL = CrossoverPair(cutoff: 200, sampleRate: sr), xbR = CrossoverPair(cutoff: 200, sampleRate: sr)
-            // Bass hands over across one beat centred on the midpoint.
-            let half = min(Double(len) / 2, beatSamples / 2)
-            let swapStart = Double(len) / 2 - half, swapEnd = Double(len) / 2 + half
-            for u in 0..<len {
-                let x = Float(u) / Float(len)
-                let gah = cosf(x * .pi / 2), gbh = sinf(x * .pi / 2)
-                var gbl: Float = 0
-                if Double(u) >= swapEnd { gbl = 1 }
-                else if Double(u) > swapStart { gbl = Float((Double(u) - swapStart) / (swapEnd - swapStart)) }
-                let gal = 1 - gbl
-                let (aLowL, aHighL) = xaL.split(a.left[aOffset + u])
-                let (aLowR, aHighR) = xaR.split(a.right[aOffset + u])
-                let (bLowL, bHighL) = xbL.split(b.left[u])
-                let (bLowR, bHighR) = xbR.split(b.right[u])
-                out.left[u] = aHighL * gah + aLowL * gal + bHighL * gbh + bLowL * gbl
-                out.right[u] = aHighR * gah + aLowR * gal + bHighR * gbh + bLowR * gbl
-            }
-        case .filterSweep:
-            var lpL = Biquad(), lpR = Biquad(), hpL = Biquad(), hpR = Biquad()
-            let block = 64
-            var u = 0
-            while u < len {
-                let x = Double(u) / Double(len)
-                let lpCut = 18000 * pow(140 / 18000, x)
-                let hpCut = 1500 * pow(20 / 1500, x)
-                lpL.setLowpass(cutoff: lpCut, sampleRate: sr); lpR.setLowpass(cutoff: lpCut, sampleRate: sr)
-                hpL.setHighpass(cutoff: hpCut, sampleRate: sr); hpR.setHighpass(cutoff: hpCut, sampleRate: sr)
-                let end = min(len, u + block)
-                for v in u..<end {
-                    let xf = Float(v) / Float(len)
-                    let ga = cosf(xf * .pi / 2), gb = sinf(xf * .pi / 2)
-                    out.left[v] = lpL.process(a.left[aOffset + v]) * ga + hpL.process(b.left[v]) * gb
-                    out.right[v] = lpR.process(a.right[aOffset + v]) * ga + hpR.process(b.right[v]) * gb
-                }
-                u = end
+                out.left[u] = b.left[u] + a.left[aStart + u]
+                out.right[u] = b.right[u] + a.right[aStart + u]
             }
         }
+        transitions[i] = out
+        return out
     }
 
     // MARK: - Composition
@@ -210,7 +188,6 @@ final class MixRenderer {
         var out = StereoBuffer(count: count)
         guard count > 0 else { return out }
         for t in layout.tracks where t.end > from && t.start < to {
-            // Entry overlap (blend with the previous song).
             if t.entryOverlap > 0 && t.index > 0 {
                 let r0 = max(from, t.start), r1 = min(to, t.soloStart)
                 if r1 > r0 {
@@ -221,7 +198,6 @@ final class MixRenderer {
                     }
                 }
             }
-            // Solo region.
             let s0 = max(from, t.soloStart), s1 = min(to, t.outroStart)
             if s1 > s0 {
                 let sp = try span(t.index)
@@ -231,7 +207,6 @@ final class MixRenderer {
                 }
             }
         }
-        // Global fades.
         let total = layout.totalSamples
         let fadeIn = Int(sampleRate * 0.01)
         let fadeOut = max(Int(sampleRate * 0.01), Int(settings.endFadeSeconds * sampleRate))
@@ -297,6 +272,129 @@ final class MixRenderer {
     }
 }
 
+// MARK: - Effects
+
+enum Effects {
+
+    /// Blend: the incoming song opens up from under a low-pass while its bass
+    /// is held back; at the midpoint the bass hands over in one beat; the
+    /// outgoing song's highs roll off over the last quarter. Equal-power gains.
+    static func blend(a: StereoBuffer, aOffset: Int, b: StereoBuffer, beatSamples: Double, sampleRate sr: Double, into out: inout StereoBuffer) {
+        let len = out.count
+        guard len > 0 else { return }
+        var xaL = CrossoverPair(cutoff: 200, sampleRate: sr), xaR = CrossoverPair(cutoff: 200, sampleRate: sr)
+        var xbL = CrossoverPair(cutoff: 200, sampleRate: sr), xbR = CrossoverPair(cutoff: 200, sampleRate: sr)
+        var lpBL = Biquad(), lpBR = Biquad(), lpAL = Biquad(), lpAR = Biquad()
+        let half = min(Double(len) / 2, beatSamples / 2)
+        let swapStart = Double(len) / 2 - half, swapEnd = Double(len) / 2 + half
+        let block = 64
+        var u = 0
+        while u < len {
+            let x = Double(u) / Double(len)
+            // Incoming opens from 600 Hz to wide open over the first 60%.
+            let openX = min(1, x / 0.6)
+            let bCut = 600 * pow(20000 / 600, openX)
+            lpBL.setLowpass(cutoff: bCut, sampleRate: sr); lpBR.setLowpass(cutoff: bCut, sampleRate: sr)
+            // Outgoing's top rolls off over the last 35%.
+            let closeX = max(0, (x - 0.65) / 0.35)
+            let aCut = 20000 * pow(1500 / 20000, closeX)
+            lpAL.setLowpass(cutoff: aCut, sampleRate: sr); lpAR.setLowpass(cutoff: aCut, sampleRate: sr)
+            let end = min(len, u + block)
+            for v in u..<end {
+                let xf = Float(v) / Float(len)
+                let gah = cosf(xf * .pi / 2), gbh = sinf(xf * .pi / 2)
+                var gbl: Float = 0
+                if Double(v) >= swapEnd { gbl = 1 }
+                else if Double(v) > swapStart { gbl = Float((Double(v) - swapStart) / (swapEnd - swapStart)) }
+                let gal = 1 - gbl
+                let aL = lpAL.process(a.left[aOffset + v]), aR = lpAR.process(a.right[aOffset + v])
+                let bL = lpBL.process(b.left[v]), bR = lpBR.process(b.right[v])
+                let (aLowL, aHighL) = xaL.split(aL)
+                let (aLowR, aHighR) = xaR.split(aR)
+                let (bLowL, bHighL) = xbL.split(bL)
+                let (bLowR, bHighR) = xbR.split(bR)
+                out.left[v] = aHighL * gah + aLowL * gal + bHighL * gbh + bLowL * gbl
+                out.right[v] = aHighR * gah + aLowR * gal + bHighR * gbh + bLowR * gbl
+            }
+            u = end
+        }
+    }
+
+    /// High-pass sweep from 30 Hz to 1.5 kHz over `count` samples (the song thins out).
+    static func highPassSweep(_ buf: inout StereoBuffer, from: Int, count: Int, sampleRate sr: Double) {
+        guard count > 0, from >= 0, from + count <= buf.count else { return }
+        var hpL = Biquad(), hpR = Biquad()
+        let block = 64
+        var u = 0
+        while u < count {
+            let x = Double(u) / Double(count)
+            let cut = 30 * pow(1500 / 30, x * x)   // slow start, fast finish
+            hpL.setHighpass(cutoff: cut, sampleRate: sr); hpR.setHighpass(cutoff: cut, sampleRate: sr)
+            let end = min(count, u + block)
+            for v in u..<end {
+                buf.left[from + v] = hpL.process(buf.left[from + v])
+                buf.right[from + v] = hpR.process(buf.right[from + v])
+            }
+            u = end
+        }
+    }
+
+    /// White-noise riser: band-pass sweeping up, volume swelling to `level`.
+    static func addRiser(_ buf: inout StereoBuffer, from: Int, count: Int, sampleRate sr: Double, level: Float) {
+        guard count > 0, from >= 0, from + count <= buf.count else { return }
+        var bp = Biquad()
+        var rng: UInt64 = 0x9E3779B97F4A7C15
+        let block = 64
+        var u = 0
+        while u < count {
+            let x = Double(u) / Double(count)
+            bp.setHighpass(cutoff: 300 * pow(4000 / 300, x), sampleRate: sr, q: 1.2)
+            let end = min(count, u + block)
+            for v in u..<end {
+                rng = rng &* 6364136223846793005 &+ 1442695040888963407
+                let n = Float(Int64(bitPattern: rng) >> 40) / Float(1 << 23)
+                let xf = Float(v) / Float(count)
+                let s = bp.process(n) * level * xf * xf
+                buf.left[from + v] += s
+                buf.right[from + v] += s
+            }
+            u = end
+        }
+    }
+
+    /// Feeds the last `feedBeats` beats of the dry signal into a half-beat
+    /// feedback delay (low-passed, decaying) and writes the wet signal over the
+    /// end of the source and the whole tail, fading out across the tail.
+    static func echoTail(_ buf: inout StereoBuffer, sourceEnd: Int, feedBeats: Int, beatSamples: Double, tail: Int, sampleRate sr: Double) {
+        let feed = min(sourceEnd, Int(Double(feedBeats) * beatSamples))
+        guard feed > 0, tail > 0, sourceEnd + tail <= buf.count else { return }
+        let delay = max(1, Int((beatSamples / 2).rounded()))
+        let feedback: Float = 0.62
+        var lpL = Biquad(), lpR = Biquad()
+        lpL.setLowpass(cutoff: 2500, sampleRate: sr); lpR.setLowpass(cutoff: 2500, sampleRate: sr)
+        let start = sourceEnd - feed
+        let total = feed + tail
+        var wetL = [Float](repeating: 0, count: total)
+        var wetR = [Float](repeating: 0, count: total)
+        for n in 0..<total {
+            var fbL: Float = 0, fbR: Float = 0
+            if n - delay >= 0 {
+                fbL = (wetL[n - delay] + (n - delay < feed ? buf.left[start + n - delay] : 0)) * feedback
+                fbR = (wetR[n - delay] + (n - delay < feed ? buf.right[start + n - delay] : 0)) * feedback
+            }
+            wetL[n] = lpL.process(fbL)
+            wetR[n] = lpR.process(fbR)
+        }
+        // Write: during the feed beats add the wet to the dry; the tail is wet only, fading out.
+        for n in 0..<total {
+            var w: Float = 1
+            if n >= feed { w = 1 - Float(n - feed) / Float(tail) }
+            buf.left[start + n] += wetL[n] * w
+            buf.right[start + n] += wetR[n] * w
+        }
+    }
+}
+
 // MARK: - Export
 
 enum Exporter {
@@ -322,15 +420,13 @@ enum Exporter {
         return nil
     }
 
-    /// Converts the float CAF master to the chosen format, normalizing so the
-    /// loudest peak sits at −1 dBFS when the render exceeded that.
+    /// Converts the float CAF master to the chosen format through a brickwall
+    /// limiter (ceiling −1 dBFS) so the louder loudness target never clips.
     static func export(master: URL, peak: Float, to dest: URL, format: ExportFormat, sampleRate: Double, ffmpeg: String?) throws {
-        let ceiling: Float = 0.891   // −1 dBFS
-        let scale: Float = peak > ceiling ? ceiling / peak : 1
         try? FileManager.default.removeItem(at: dest)
         switch format {
         case .wav16, .wav24:
-            try writePCM(master: master, to: dest, bits: format == .wav16 ? 16 : 24, scale: scale, sampleRate: sampleRate)
+            try writePCM(master: master, to: dest, bits: format == .wav16 ? 16 : 24, sampleRate: sampleRate)
         case .m4a:
             let settingsDict: [String: Any] = [
                 AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -338,13 +434,13 @@ enum Exporter {
                 AVNumberOfChannelsKey: 2,
                 AVEncoderBitRateKey: 256_000,
             ]
-            try transcode(master: master, to: dest, settings: settingsDict, scale: scale, sampleRate: sampleRate)
+            try transcode(master: master, to: dest, settings: settingsDict, sampleRate: sampleRate)
         case .mp3:
             guard let ffmpeg else {
                 throw RenderError(description: "MP3 export needs ffmpeg. Install it (brew install ffmpeg) or run TrackForge once so it downloads one — or export WAV and convert.")
             }
             let tmpWav = dest.deletingPathExtension().appendingPathExtension("blend-tmp.wav")
-            try writePCM(master: master, to: tmpWav, bits: 16, scale: scale, sampleRate: sampleRate)
+            try writePCM(master: master, to: tmpWav, bits: 16, sampleRate: sampleRate)
             defer { try? FileManager.default.removeItem(at: tmpWav) }
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: ffmpeg)
@@ -361,7 +457,7 @@ enum Exporter {
         }
     }
 
-    private static func writePCM(master: URL, to dest: URL, bits: Int, scale: Float, sampleRate: Double) throws {
+    private static func writePCM(master: URL, to dest: URL, bits: Int, sampleRate: Double) throws {
         let settingsDict: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: sampleRate,
@@ -370,26 +466,69 @@ enum Exporter {
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMIsBigEndianKey: false,
         ]
-        try transcode(master: master, to: dest, settings: settingsDict, scale: scale, sampleRate: sampleRate)
+        try transcode(master: master, to: dest, settings: settingsDict, sampleRate: sampleRate)
     }
 
-    private static func transcode(master: URL, to dest: URL, settings: [String: Any], scale: Float, sampleRate: Double) throws {
+    private static func transcode(master: URL, to dest: URL, settings: [String: Any], sampleRate: Double) throws {
         let input = try AVAudioFile(forReading: master, commonFormat: .pcmFormatFloat32, interleaved: false)
         let output = try AVAudioFile(forWriting: dest, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
         let chunk: AVAudioFrameCount = 1 << 16
         guard let buf = AVAudioPCMBuffer(pcmFormat: input.processingFormat, frameCapacity: chunk) else {
             throw RenderError(description: "Buffer allocation failed")
         }
+        var limiter = Limiter(sampleRate: sampleRate, ceiling: 0.891)
         while input.framePosition < input.length {
             try input.read(into: buf, frameCount: chunk)
-            guard buf.frameLength > 0 else { break }
-            if scale != 1, let data = buf.floatChannelData {
-                var s = scale
-                for ch in 0..<Int(buf.format.channelCount) {
-                    vDSP_vsmul(data[ch], 1, &s, data[ch], 1, vDSP_Length(buf.frameLength))
+            guard buf.frameLength > 0, let data = buf.floatChannelData else { break }
+            limiter.process(left: data[0], right: data[1], count: Int(buf.frameLength))
+            try output.write(from: buf)
+        }
+    }
+}
+
+/// Brickwall peak limiter with 2 ms lookahead: instant attack (via the
+/// lookahead delay), 80 ms release. Transparent on normal material, holds
+/// the loud overlaps at the ceiling instead of clipping.
+struct Limiter {
+    private let ceiling: Float
+    private let lookahead: Int
+    private let releaseCoef: Float
+    private var delayL: [Float]
+    private var delayR: [Float]
+    private var gainHold: [Float]
+    private var writeIndex = 0
+    private var gain: Float = 1
+
+    init(sampleRate: Double, ceiling: Float) {
+        self.ceiling = ceiling
+        lookahead = max(1, Int(sampleRate * 0.002))
+        releaseCoef = Float(exp(-1 / (0.080 * sampleRate)))
+        delayL = [Float](repeating: 0, count: lookahead)
+        delayR = [Float](repeating: 0, count: lookahead)
+        gainHold = [Float](repeating: 1, count: lookahead)
+    }
+
+    mutating func process(left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>, count: Int) {
+        for i in 0..<count {
+            let inL = left[i], inR = right[i]
+            let peak = max(abs(inL), abs(inR))
+            // Gain needed for this sample; it applies to the delayed signal via the hold buffer.
+            let needed: Float = peak > ceiling ? ceiling / peak : 1
+            // Spread the reduction back over the lookahead window (minimum over the window).
+            if needed < 1 {
+                for k in 0..<lookahead where needed < gainHold[(writeIndex + k) % lookahead] {
+                    gainHold[(writeIndex + k) % lookahead] = needed
                 }
             }
-            try output.write(from: buf)
+            let outL = delayL[writeIndex], outR = delayR[writeIndex]
+            let target = gainHold[writeIndex]
+            if target < gain { gain = target } else { gain = target + (gain - target) * releaseCoef }
+            left[i] = outL * gain
+            right[i] = outR * gain
+            delayL[writeIndex] = inL
+            delayR[writeIndex] = inR
+            gainHold[writeIndex] = 1
+            writeIndex = (writeIndex + 1) % lookahead
         }
     }
 }

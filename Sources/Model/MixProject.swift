@@ -5,38 +5,83 @@
 import Foundation
 
 enum TransitionStyle: String, Codable, CaseIterable, Identifiable {
-    case bassSwap, crossfade, filterSweep, cut
+    case auto, blend, echoOut, filterDrop, cut
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .bassSwap: return "Bass swap"
-        case .crossfade: return "Crossfade"
-        case .filterSweep: return "Filter sweep"
+        case .auto: return "Auto"
+        case .blend: return "Blend"
+        case .echoOut: return "Echo out"
+        case .filterDrop: return "Filter drop"
         case .cut: return "Cut"
         }
     }
 
     var help: String {
         switch self {
-        case .bassSwap: return "Highs crossfade; the bass switches over halfway — the standard club blend."
-        case .crossfade: return "Plain equal-power crossfade of both songs."
-        case .filterSweep: return "Outgoing song sinks under a low-pass filter while the new one opens up."
-        case .cut: return "Hard cut on the downbeat. No overlap."
+        case .auto: return "Picks per pair: a blend when both songs have room for it and the keys agree, otherwise an echo-out or filter drop on the phrase."
+        case .blend: return "The next song comes in filtered under this song's outro, the bass hands over halfway, this song's highs roll off. Needs an outro and an intro."
+        case .echoOut: return "This song's last beat echoes away in time while the next song starts clean on the 1. The go-to for songs with vocals or different tempos."
+        case .filterDrop: return "This song thins out under a rising high-pass over the last bars, then cuts as the next song drops on the 1."
+        case .cut: return "Hard cut on the phrase boundary."
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        switch raw {
+        case "bassSwap": self = .auto          // 1.0's default; nobody chose it
+        case "crossfade": self = .blend
+        case "filterSweep": self = .filterDrop
+        default: self = TransitionStyle(rawValue: raw) ?? .auto
+        }
+    }
+
+    /// The explicit style matching a resolved one (for its description).
+    static func describe(_ resolved: ResolvedStyle) -> TransitionStyle {
+        switch resolved {
+        case .blend: return .blend
+        case .echoOut: return .echoOut
+        case .filterDrop: return .filterDrop
+        case .cut: return .cut
         }
     }
 }
 
 struct TransitionSettings: Codable, Hashable {
-    var style: TransitionStyle = .bassSwap
-    /// Bars of the outgoing song that overlap the incoming one (0 for cut).
-    var overlapBars: Int = 8
+    var style: TransitionStyle = .auto
+    /// Bars of overlap for a blend, or of filter sweep for a filter drop. 0 = auto.
+    var overlapBars: Int = 0
     /// Time-stretch the incoming song to the outgoing tempo for the overlap.
     var tempoSync: Bool = true
     /// Bars over which the incoming song eases back to its own tempo afterwards.
     var rampBars: Int = 8
+    /// Bars the echo tail rings out over (echo out / filter drop).
+    var tailBars: Int = 2
+    /// Noise riser under the last bars of a filter drop.
+    var riser: Bool = false
 
-    static let overlapChoices = [1, 2, 4, 8, 16, 32]
+    static let overlapChoices = [0, 2, 4, 8, 16]
+
+    init() {}
+
+    init(style: TransitionStyle, overlapBars: Int = 0, tempoSync: Bool = true, rampBars: Int = 8, tailBars: Int = 2, riser: Bool = false) {
+        self.style = style; self.overlapBars = overlapBars; self.tempoSync = tempoSync
+        self.rampBars = rampBars; self.tailBars = tailBars; self.riser = riser
+    }
+
+    enum CodingKeys: String, CodingKey { case style, overlapBars, tempoSync, rampBars, tailBars, riser }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        style = try c.decodeIfPresent(TransitionStyle.self, forKey: .style) ?? .auto
+        overlapBars = try c.decodeIfPresent(Int.self, forKey: .overlapBars) ?? 0
+        tempoSync = try c.decodeIfPresent(Bool.self, forKey: .tempoSync) ?? true
+        rampBars = try c.decodeIfPresent(Int.self, forKey: .rampBars) ?? 8
+        tailBars = try c.decodeIfPresent(Int.self, forKey: .tailBars) ?? 2
+        riser = try c.decodeIfPresent(Bool.self, forKey: .riser) ?? false
+    }
 }
 
 struct MixEntry: Identifiable, Codable, Hashable {

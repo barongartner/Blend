@@ -7,6 +7,7 @@
 
 import Foundation
 import AVFoundation
+import Accelerate
 
 var failures = 0
 func check(_ cond: Bool, _ msg: String) {
@@ -139,12 +140,12 @@ func runSynthetic() throws {
     var eA = MixEntry(track: trackA)
     eA.inTime = aa.downbeat(atOrAfter: 1)
     eA.outTime = aa.downbeat(atOrBefore: 60)
-    eA.transition = TransitionSettings(style: .bassSwap, overlapBars: 8, tempoSync: true, rampBars: 8)
+    eA.transition = TransitionSettings(style: .blend, overlapBars: 8, tempoSync: true, rampBars: 8)
     var eB = MixEntry(track: trackB)
     eB.inTime = ab.downbeat(atOrAfter: 1)
     eB.outTime = ab.downbeat(atOrBefore: 60)
-    let entries = [ResolvedEntry(entry: eA, analysis: aa), ResolvedEntry(entry: eB, analysis: ab)]
-    let layout = MixLayout.build(entries: entries, sampleRate: 48000)
+    let layout = MixLayout.build(entries: [ResolvedEntry(entry: eA, analysis: aa), ResolvedEntry(entry: eB, analysis: ab)], sampleRate: 48000)
+    let entries = layout.entries
     let la = layout.tracks[0], lb = layout.tracks[1]
     print(String(format: "  layout: total %.3fs; A body %d outro %d; B entry %d rho %.4f ramp %d body %d",
                  layout.totalSeconds, la.body, la.outroOverlap, lb.entryOverlap, lb.rho, lb.rampOut, lb.body))
@@ -239,20 +240,24 @@ func runRealMix(_ paths: [String]) throws {
         clips.append(clip)
         analyses.append(a)
         var e = MixEntry(track: TrackInfo.file(path: p, title: url.deletingPathExtension().lastPathComponent, artist: "", album: "", duration: clip.duration, taggedBPM: nil))
-        e.transition = TransitionSettings(style: .bassSwap, overlapBars: 8, tempoSync: true, rampBars: 8)
+        e.transition = TransitionSettings(style: .auto)
         entries.append(e)
         print(String(format: "  %@: %.2f BPM, downbeat %.3f, in %.1f out %.1f", url.lastPathComponent.prefix(28) as CVarArg, a.bpm, a.firstDownbeat, a.suggestedIn, a.suggestedOut))
     }
-    let resolved = zip(entries, analyses).map { ResolvedEntry(entry: $0, analysis: $1) }
-    let layout = MixLayout.build(entries: resolved, sampleRate: sr)
+    let layout = MixLayout.build(entries: zip(entries, analyses).map { ResolvedEntry(entry: $0, analysis: $1) }, sampleRate: sr)
+    let resolved = layout.entries
     print(String(format: "  layout total %.3fs", layout.totalSeconds))
+    for (i, r) in resolved.enumerated() {
+        let t = r.transitionOut.map { "\($0.style.label) \($0.overlapBars > 0 ? "\($0.overlapBars) bars" : "")\($0.tailBars > 0 ? " tail \($0.tailBars)" : "")\($0.sweepBars > 0 ? " sweep \($0.sweepBars)" : "") — \($0.reason)" } ?? "end"
+        print(String(format: "  [%d] %@: in %.1f out %.1f → %@", i, r.title.prefix(24) as CVarArg, r.inTime, r.outTime, t))
+    }
     for t in layout.tracks where !t.warnings.isEmpty { print("  warning [\(t.index)]: \(t.warnings.joined(separator: " "))") }
     let renderer = MixRenderer(layout: layout, entries: resolved, settings: MixSettings()) { clips[$0] }
 
     // Per-transition alignment.
     for i in 1..<layout.tracks.count {
         let cur = layout.tracks[i], prev = layout.tracks[i - 1]
-        guard cur.entryOverlap > 0 else { print("  transition \(i): cut"); continue }
+        guard cur.entryOverlap > 0, resolved[i - 1].transitionOut?.style == .blend else { print("  transition \(i): \(resolved[i - 1].transitionOut?.style.label ?? "cut") — alignment check only applies to blends"); continue }
         let a = try renderer.span(i - 1), b = try renderer.span(i)
         let aStart = prev.span - prev.outroOverlap
         let len = cur.entryOverlap
@@ -282,6 +287,21 @@ func runRealMix(_ paths: [String]) throws {
     try Exporter.export(master: tmp, peak: result.peak, to: wav, format: .wav24, sampleRate: sr, ffmpeg: nil)
     let d = AudioDecoder.duration(of: wav) ?? 0
     check(abs(d - layout.totalSeconds) < 0.001, String(format: "WAV is %.3fs, layout said %.3fs", d, layout.totalSeconds))
+    // Sanity on the exported audio: finite, limited, and each transition region has signal.
+    let mixed = try AudioDecoder.decode(url: wav)
+    var peakOut: Float = 0
+    vDSP_maxmgv(mixed.left, 1, &peakOut, vDSP_Length(mixed.frameCount))
+    check(peakOut <= 0.90 && mixed.left.allSatisfy { $0.isFinite }, String(format: "export peak %.3f ≤ −1 dBFS and finite", peakOut))
+    for i in 1..<layout.tracks.count {
+        let cur = layout.tracks[i]
+        let sr = layout.sampleRate
+        func rms(_ from: Int, _ to: Int) -> Float { TrackAnalyzer.rmsLevel(mixed.left, mixed.right, from: max(0, from), to: min(mixed.frameCount, to)) }
+        let before = rms(cur.start - Int(sr * 2), cur.start)
+        let at = rms(cur.start, cur.start + Int(sr * 2))
+        let after = rms(cur.soloStart + Int(sr), cur.soloStart + Int(sr * 3))
+        print(String(format: "  transition %d (%@): level 2s before %.3f, first 2s %.3f, after %.3f", i, resolved[i - 1].transitionOut?.style.label ?? "?", before, at, after))
+        check(at > 0.05 && after > 0.05, "transition \(i) keeps playing through the switch")
+    }
     print("  mix: \(wav.path)")
 }
 
@@ -326,6 +346,11 @@ func analyzeFiles(_ paths: [String]) throws {
         let a = TrackAnalyzer.analyze(clip: clip, taggedBPM: nil)
         print(String(format: "%@\n  %.1fs  bpm %.2f  firstDownbeat %.3f  grid conf %.2f  key %@ (%@, conf %.2f)  rms %.3f  in %.1f out %.1f  (%.1fs)",
                      url.lastPathComponent, clip.duration, a.bpm, a.firstDownbeat, a.gridConfidence, a.keyName, a.camelot, a.keyConfidence, a.rms, a.suggestedIn, a.suggestedOut, Date().timeIntervalSince(t0)))
+        if let st = a.structure {
+            let secs = st.sections.map { "\($0.startBar)-\($0.endBar) \($0.level.rawValue)(\(String(format: "%.2f", $0.energy)))" }.joined(separator: ", ")
+            print("  bars \(st.barCount), phrase offset \(st.phraseOffset), intro \(st.introBars) bars, outro \(st.outroBars) bars")
+            print("  sections: \(secs)")
+        }
     }
 }
 

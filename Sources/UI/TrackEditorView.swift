@@ -152,7 +152,7 @@ struct TrackEditorView: View {
                 Image(systemName: "plus.magnifyingglass").foregroundStyle(.secondary)
                 Toggle("Snap to beats", isOn: $snapToBeats).toggleStyle(.checkbox)
                 Spacer()
-                Text("Drag the IN and OUT handles. Faint lines are beats, bold lines are bars (numbered). Green shading: the previous song is still playing; blue: the next one has come in. Lines should sit on the kicks — if they sit between them, use −½ beat.")
+                Text("Drag the IN and OUT handles. Faint lines are beats, bold lines are bars (numbered), orange lines are 8-bar phrases. The band along the top shows sections: orange = drop/chorus, gray = verse, blue = quiet. Green shading: the previous song is still playing; blue: the next one has come in.")
                     .font(.caption).foregroundStyle(.secondary).frame(maxWidth: 560, alignment: .leading)
             }
             .padding(.horizontal, 12)
@@ -208,7 +208,8 @@ struct TrackEditorView: View {
                 HStack {
                     Button("Auto") {
                         model.update(entryID) { $0.inTime = nil; $0.outTime = nil }
-                    }.help("Back to the analyzer's suggestion: skip the quiet intro and outro")
+                    }.help("Let the planner place IN and OUT from the song's structure and the transitions around it")
+                    if r.autoIn || r.autoOut { Text("auto-placed").font(.caption).foregroundStyle(.secondary) }
                     Button("Whole song") {
                         model.update(entryID) { $0.inTime = 0; $0.outTime = duration }
                     }
@@ -235,20 +236,43 @@ struct TrackEditorView: View {
                     Picker("Style", selection: Binding(get: { entry.transition.style }, set: { v in model.update(entryID) { $0.transition.style = v } })) {
                         ForEach(TransitionStyle.allCases) { Text($0.label).tag($0) }
                     }
-                    .frame(width: 260)
-                    Text(entry.transition.style.help).font(.caption).foregroundStyle(.secondary)
-                    if entry.transition.style != .cut {
-                        Picker("Overlap", selection: Binding(get: { entry.transition.overlapBars }, set: { v in model.update(entryID) { $0.transition.overlapBars = v } })) {
-                            ForEach(TransitionSettings.overlapChoices, id: \.self) { Text("\($0) bars").tag($0) }
+                    .frame(width: 300)
+                    if let t = r.transitionOut {
+                        if entry.transition.style == .auto {
+                            Text("Auto chose **\(t.style.label)**" + (t.reason.isEmpty ? "" : " — \(t.reason)"))
+                                .font(.callout)
                         }
-                        .frame(width: 260)
+                        Text(TransitionStyle.describe(t.style).help).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Text(entry.transition.style.help).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    let effective = r.transitionOut?.style
+                    if entry.transition.style == .blend || entry.transition.style == .filterDrop || (entry.transition.style == .auto && (effective == .blend || effective == .filterDrop)) {
+                        Picker(effective == .filterDrop ? "Sweep" : "Overlap",
+                               selection: Binding(get: { entry.transition.overlapBars }, set: { v in model.update(entryID) { $0.transition.overlapBars = v } })) {
+                            ForEach(TransitionSettings.overlapChoices, id: \.self) { Text($0 == 0 ? "Auto" : "\($0) bars").tag($0) }
+                        }
+                        .frame(width: 300)
+                    }
+                    if effective == .blend {
                         Toggle("Tempo-sync the next song to this one", isOn: Binding(get: { entry.transition.tempoSync }, set: { v in model.update(entryID) { $0.transition.tempoSync = v } }))
                         if entry.transition.tempoSync {
                             Picker("Ease back over", selection: Binding(get: { entry.transition.rampBars }, set: { v in model.update(entryID) { $0.transition.rampBars = v } })) {
                                 ForEach([0, 2, 4, 8, 16, 32], id: \.self) { Text($0 == 0 ? "instantly" : "\($0) bars").tag($0) }
                             }
-                            .frame(width: 260)
+                            .frame(width: 300)
                         }
+                    }
+                    if effective == .echoOut {
+                        Picker("Echo tail", selection: Binding(get: { entry.transition.tailBars }, set: { v in model.update(entryID) { $0.transition.tailBars = v } })) {
+                            ForEach([1, 2, 4], id: \.self) { Text("\($0) bar\($0 == 1 ? "" : "s")").tag($0) }
+                        }
+                        .frame(width: 300)
+                    }
+                    if effective == .filterDrop {
+                        Toggle("Noise riser under the sweep", isOn: Binding(get: { entry.transition.riser }, set: { v in model.update(entryID) { $0.transition.riser = v } }))
                     }
                     if let i = index, let next = model.layout.tracks[safe: i + 1], !next.warnings.isEmpty {
                         Text(next.warnings.joined(separator: " ")).font(.caption).foregroundStyle(.orange)
@@ -261,7 +285,10 @@ struct TrackEditorView: View {
                         if model.previewPlaying != nil { Button("Stop") { model.services.stopPreview() } }
                     }
                     if let i = index, let cur = model.layout.tracks[safe: i] {
-                        Text("Overlap \(TimeFormat.clock(Double(cur.outroOverlap) / model.project.settings.sampleRate)) · mix so far \(TimeFormat.clock(Double(cur.outroStart) / model.project.settings.sampleRate)) when the next song starts")
+                        let sr = model.project.settings.sampleRate
+                        Text("Next song starts at \(TimeFormat.clock(Double(cur.outroStart) / sr)) into the mix" +
+                             (cur.outroOverlap > 0 ? " · overlap \(TimeFormat.clock(Double(cur.outroOverlap) / sr))" : "") +
+                             (cur.tail > 0 ? " · tail \(TimeFormat.clock(Double(cur.tail) / sr))" : ""))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -285,6 +312,9 @@ struct TrackEditorView: View {
             Button { set(max(0, min(duration, r.nearestDownbeat(to: value)))) } label: { Image(systemName: "arrow.down.to.line") }
                 .help("Snap to the nearest bar start (downbeat)")
                 .disabled(r.analysis == nil)
+            Button { set(max(0, min(duration, r.nearestPhrase(to: value)))) } label: { Text("phrase") }
+                .help("Snap to the nearest 8-bar phrase boundary — where DJs make the switch")
+                .disabled(r.structure == nil)
             Button { play() } label: { Image(systemName: "play.fill") }.help("Play 8 seconds from here")
             if r.analysis != nil {
                 Image(systemName: r.isDownbeat(value) ? "checkmark.circle.fill" : "circle")
@@ -324,6 +354,25 @@ struct WaveformCanvas: View {
             }
             if outroOverlap > 0 {
                 ctx.fill(Path(CGRect(x: outX - outroOverlap * pps, y: 0, width: outroOverlap * pps, height: h)), with: .color(.blue.opacity(0.18)))
+            }
+
+            // Sections (structure): colored band along the top.
+            if let st = analysis?.structure {
+                for sec in st.sections {
+                    let x0 = resolved.time(ofBar: sec.startBar) * pps
+                    let x1 = resolved.time(ofBar: sec.endBar) * pps
+                    let color: Color = sec.level == .high ? .orange : (sec.level == .low ? .blue : .gray)
+                    ctx.fill(Path(CGRect(x: x0, y: 0, width: max(1, x1 - x0), height: 6)), with: .color(color.opacity(0.8)))
+                }
+                // Phrase lines every 8 bars.
+                var b = st.phraseOffset % 8
+                while b < st.barCount {
+                    let x = resolved.time(ofBar: b) * pps
+                    var p = Path()
+                    p.move(to: CGPoint(x: x, y: 6)); p.addLine(to: CGPoint(x: x, y: h))
+                    ctx.stroke(p, with: .color(.orange.opacity(0.55)), lineWidth: 1.5)
+                    b += 8
+                }
             }
 
             // Beat grid.

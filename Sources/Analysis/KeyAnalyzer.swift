@@ -20,15 +20,16 @@ enum KeyAnalyzer {
     static let camelotMajor = ["8B", "3B", "10B", "5B", "12B", "7B", "2B", "9B", "4B", "11B", "6B", "1B"]
     static let camelotMinor = ["5A", "12A", "7A", "2A", "9A", "4A", "11A", "6A", "1A", "8A", "3A", "10A"]
 
-    /// Mean chroma vector over the signal (12 pitch classes, normalized).
-    static func chroma(signal: [Float], sampleRate: Double) -> [Double] {
+    /// Chroma per frame (12 pitch classes each, summed magnitudes), plus the
+    /// frame rate. 8192-point STFT, hop 4096.
+    static func chromaFrames(signal: [Float], sampleRate: Double) -> (frames: [[Double]], fps: Double) {
         let n = 8192
         let hop = 4096
-        guard signal.count > n else { return [Double](repeating: 1.0 / 12, count: 12) }
+        let fps = sampleRate / Double(hop)
+        guard signal.count > n else { return ([], fps) }
         let fft = RealFFT(size: n)
         let half = n / 2
         let binHz = sampleRate / Double(n)
-        // Map each bin in 55 Hz ... 1760 Hz to a pitch class.
         var binClass = [Int](repeating: -1, count: half)
         for k in 1..<half {
             let f = Double(k) * binHz
@@ -36,21 +37,30 @@ enum KeyAnalyzer {
             let midi = 69 + 12 * log2(f / 440)
             binClass[k] = ((Int(midi.rounded()) % 12) + 12) % 12
         }
-        var chroma = [Double](repeating: 0, count: 12)
         var power = [Float](repeating: 0, count: half)
-        let frames = (signal.count - n) / hop + 1
+        let count = (signal.count - n) / hop + 1
+        var frames: [[Double]] = []
+        frames.reserveCapacity(count)
         signal.withUnsafeBufferPointer { sp in
             power.withUnsafeMutableBufferPointer { pp in
-                for t in 0..<frames {
+                for t in 0..<count {
                     fft.powerSpectrum(sp.baseAddress! + t * hop, into: pp.baseAddress!)
-                    for k in 1..<half where binClass[k] >= 0 {
-                        chroma[binClass[k]] += Double(sqrtf(pp[k]))
-                    }
+                    var c = [Double](repeating: 0, count: 12)
+                    for k in 1..<half where binClass[k] >= 0 { c[binClass[k]] += Double(sqrtf(pp[k])) }
+                    frames.append(c)
                 }
             }
         }
+        return (frames, fps)
+    }
+
+    /// Mean chroma vector over the signal (12 pitch classes, normalized).
+    static func chroma(signal: [Float], sampleRate: Double) -> [Double] {
+        let (frames, _) = chromaFrames(signal: signal, sampleRate: sampleRate)
+        var chroma = [Double](repeating: 0, count: 12)
+        for f in frames { for i in 0..<12 { chroma[i] += f[i] } }
         let total = chroma.reduce(0, +)
-        if total > 0 { for i in 0..<12 { chroma[i] /= total } }
+        if total > 0 { for i in 0..<12 { chroma[i] /= total } } else { chroma = [Double](repeating: 1.0 / 12, count: 12) }
         return chroma
     }
 
