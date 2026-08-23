@@ -105,7 +105,7 @@ final class MusicCapture {
         }
         BlendLog.write("capture: Music pid \(musicApp.processIdentifier), audio object \(processObject), output \(outUID)")
         let tap = try TapAggregate(processObjectID: processObject, destinationUID: outUID, mute: true)
-        BlendLog.write("capture: tap format \(Int(tap.format.mSampleRate)) Hz, \(tap.format.mChannelsPerFrame) ch")
+        BlendLog.write("capture: recording at \(Int(tap.format.mSampleRate)) Hz (aggregate clock), \(tap.format.mChannelsPerFrame) ch")
         defer { tap.invalidate() }
         let channels = max(1, Int(tap.format.mChannelsPerFrame))
         let sampleRate = tap.format.mSampleRate

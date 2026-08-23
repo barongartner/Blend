@@ -105,6 +105,15 @@ enum CA {
         return defaultOutputDevice().flatMap { deviceUID($0) }
     }
 
+    /// The rate a device is actually running at. For an aggregate this is the
+    /// rate of its main sub-device — and that, not the tap's own format, is
+    /// the rate of the frames the IOProc receives.
+    static func nominalSampleRate(_ id: AudioObjectID) -> Double? {
+        var rate: Double = 0
+        guard read(id, kAudioDevicePropertyNominalSampleRate, into: &rate) == noErr, rate > 0 else { return nil }
+        return rate
+    }
+
     static func tapFormat(_ tapID: AudioObjectID) -> AudioStreamBasicDescription? {
         var asbd = AudioStreamBasicDescription()
         guard read(tapID, kAudioTapPropertyFormat, into: &asbd) == noErr, asbd.mSampleRate > 0 else { return nil }
@@ -153,10 +162,16 @@ final class TapAggregate {
         }
         aggregateID = aggID
 
-        guard let format = CA.tapFormat(tapID) else {
+        guard var format = CA.tapFormat(tapID) else {
             AudioHardwareDestroyAggregateDevice(aggID)
             AudioHardwareDestroyProcessTap(tapID)
             throw CoreAudioError(message: "could not read tap format", status: -1)
+        }
+        // Frames arrive at the aggregate's clock rate (its main sub-device's), which
+        // can differ from the tap format's nominal rate. Recording at the wrong
+        // label plays back 9% fast — learned the hard way (44.1 k device, 48 k tap).
+        if let rate = CA.nominalSampleRate(aggID), rate > 0 {
+            format.mSampleRate = rate
         }
         self.format = format
     }
