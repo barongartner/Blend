@@ -2,42 +2,44 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleName</key>
-	<string>Blend</string>
 	<key>CFBundleDisplayName</key>
 	<string>Blend</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.barongartner.Blend</string>
-	<key>CFBundleExecutable</key>
-	<string>Blend</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
-	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
-	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>CFBundleIconFile</key>
-	<string>Blend</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>14.4</string>
-	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.music</string>
-	<key>NSAudioCaptureUsageDescription</key>
-	<string>Blend records the Music app (silently) so it can mix Apple Music songs you pick into one track for your videos.</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>Blend reads your playlists from the Music app and plays songs in it while capturing them.</string>
-	<key>NSHumanReadableCopyright</key>
-	<string>© 2026 Baron Gartner</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>blendmix</string>
+			</array>
 			<key>CFBundleTypeName</key>
 			<string>Blend Mix</string>
-			<key>CFBundleTypeExtensions</key>
-			<array><string>blendmix</string></array>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 		</dict>
 	</array>
+	<key>CFBundleExecutable</key>
+	<string>Blend</string>
+	<key>CFBundleIconFile</key>
+	<string>Blend</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.barongartner.Blend</string>
+	<key>CFBundleName</key>
+	<string>Blend</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.2</string>
+	<key>CFBundleVersion</key>
+	<string>3</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.music</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.4</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Blend reads your playlists from the Music app and plays songs in it while capturing them.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Blend records the Music app (silently) so it can mix Apple Music songs you pick into one track for your videos.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>© 2026 Baron Gartner</string>
 </dict>
 </plist>

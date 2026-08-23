@@ -156,14 +156,14 @@ enum MusicBridge {
                 set sound volume to 100
                 play capPL
                 delay 1
-                set st to "stopped"
-                if player state is playing then set st to "playing"
-                if player state is paused then set st to "paused"
+                set blendState to "stopped"
+                if player state is playing then set blendState to "playing"
+                if player state is paused then set blendState to "paused"
                 set nm to ""
                 try
                     set nm to name of current track
                 end try
-                return "capture playlist has " & (count of tracks of capPL) & " track(s); after play: " & st & " / " & nm
+                return "capture playlist has " & (count of tracks of capPL) & " track(s); after play: " & blendState & " / " & nm
             end tell
         end run
         """
@@ -174,9 +174,9 @@ enum MusicBridge {
     static func playbackStatus() throws -> PlaybackStatus {
         let script = """
         tell application "Music"
-            set st to "stopped"
-            if player state is playing then set st to "playing"
-            if player state is paused then set st to "paused"
+            set blendState to "stopped"
+            if player state is playing then set blendState to "playing"
+            if player state is paused then set blendState to "paused"
             set pos to -1
             set pid to ""
             set nm to ""
@@ -187,7 +187,7 @@ enum MusicBridge {
                 set pid to persistent ID of current track
                 set nm to name of current track
             end try
-            return st & "|" & pos & "|" & pid & "|" & nm
+            return blendState & "|" & pos & "|" & pid & "|" & nm
         end tell
         """
         let s = try runAppleScript(script).trimmingCharacters(in: .whitespacesAndNewlines)
