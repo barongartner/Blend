@@ -48,10 +48,29 @@ struct MixEntry: Identifiable, Codable, Hashable {
     var bpmOverride: Double?
     /// Moves the downbeat by this many beats (mod 4) when the analyzer guessed wrong.
     var downbeatShift: Int = 0
+    /// Slides the whole beat grid by this many seconds (half-beat fixes, fine nudges).
+    var gridShift: Double = 0
     /// Manual trim in dB on top of loudness matching.
     var gainDB: Double = 0
     /// The transition from this song into the next one.
     var transition: TransitionSettings = TransitionSettings()
+
+    init(track: TrackInfo) { self.track = track }
+
+    enum CodingKeys: String, CodingKey { case id, track, inTime, outTime, bpmOverride, downbeatShift, gridShift, gainDB, transition }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        track = try c.decode(TrackInfo.self, forKey: .track)
+        inTime = try c.decodeIfPresent(Double.self, forKey: .inTime)
+        outTime = try c.decodeIfPresent(Double.self, forKey: .outTime)
+        bpmOverride = try c.decodeIfPresent(Double.self, forKey: .bpmOverride)
+        downbeatShift = try c.decodeIfPresent(Int.self, forKey: .downbeatShift) ?? 0
+        gridShift = try c.decodeIfPresent(Double.self, forKey: .gridShift) ?? 0
+        gainDB = try c.decodeIfPresent(Double.self, forKey: .gainDB) ?? 0
+        transition = try c.decodeIfPresent(TransitionSettings.self, forKey: .transition) ?? TransitionSettings()
+    }
 }
 
 enum ExportFormat: String, Codable, CaseIterable, Identifiable {

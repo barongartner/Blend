@@ -9,6 +9,9 @@
 import Foundation
 
 struct TrackAnalysis: Codable, Equatable {
+    /// Bumped whenever the analyzer changes; older cached results are redone.
+    static let currentVersion = 3
+    var version: Int
     var sampleRate: Double
     var duration: Double
 

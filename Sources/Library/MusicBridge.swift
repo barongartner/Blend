@@ -213,7 +213,10 @@ enum MusicBridge {
         guard proc.terminationStatus == 0 else {
             let msg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if msg.contains("-1743") || msg.localizedCaseInsensitiveContains("not allowed") {
-                throw MusicBridgeError(description: "Blend isn't allowed to control Music. Open System Settings → Privacy & Security → Automation and turn on Music for Blend.")
+                throw MusicBridgeError(description: "Blend isn't allowed to control Music. Open System Settings → Privacy & Security → Automation, turn on Music under Blend, then reload (⌘R).")
+            }
+            if msg.contains("-1712") {
+                throw MusicBridgeError(description: "Music didn't answer in time. If macOS showed a \"Blend wants to control Music\" prompt, click Allow and reload (⌘R); otherwise check System Settings → Privacy & Security → Automation → Blend → Music.")
             }
             throw MusicBridgeError(description: msg.isEmpty ? "osascript failed (\(proc.terminationStatus))" : msg)
         }
